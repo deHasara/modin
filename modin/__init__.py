@@ -48,6 +48,12 @@ def get_execution_engine():
             return "Python"
         else:
             try:
+                import pycylon
+            except ImportError:
+                pass
+            else:
+                return "PyCylon"
+            try:
                 import ray
 
             except ImportError:
@@ -84,7 +90,11 @@ def get_partition_format():
 class Publisher(object):
     def __init__(self, name, value):
         self.name = name
-        self.__value = value.title()
+        #self.__value = value.title()
+        if value == 'PyCylon':
+            self.__value = value
+        else:
+            self.__value = value.title()
         self.__subs = []
         self.__once = collections.defaultdict(list)
 

@@ -165,6 +165,12 @@ class PandasOnRayFactory(BaseFactory):
 
         cls.io_cls = PandasOnRayIO
 
+class PandasOnPyCylonFactory(BaseFactory):
+    @classmethod
+    def prepare(cls):
+        from modin.engines.pyCylon.pandas_on_pyCylon.io import PandasOnPyCylonIO
+        cls.io_cls = PandasOnPyCylonIO
+
 
 class PandasOnPythonFactory(BaseFactory):
     @classmethod

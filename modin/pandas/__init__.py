@@ -105,7 +105,10 @@ _NOINIT_ENGINES = {
 def _update_engine(publisher: Publisher):
     global DEFAULT_NPARTITIONS, dask_client, num_cpus
 
-    if publisher.get() == "Ray":
+    if publisher.get() == "PyCylon":
+        import pycylon
+
+    elif publisher.get() == "Ray":
         import ray
         from modin.engines.ray.utils import initialize_ray
 
