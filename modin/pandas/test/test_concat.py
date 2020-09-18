@@ -217,3 +217,4 @@ def test_sort_order(sort, join, axis):
         modin_concat,
     )
     assert list(pandas_concat.columns) == list(modin_concat.columns)
+
