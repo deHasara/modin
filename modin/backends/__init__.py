@@ -13,6 +13,6 @@
 
 from .base import BaseQueryCompiler
 from .pandas import PandasQueryCompiler
-from .pyarrow import PyarrowQueryCompiler
+#from .pyarrow import PyarrowQueryCompiler
 
-__all__ = ["BaseQueryCompiler", "PandasQueryCompiler", "PyarrowQueryCompiler"]
+#__all__ = ["BaseQueryCompiler", "PandasQueryCompiler", "PyarrowQueryCompiler"]

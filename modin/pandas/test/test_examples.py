@@ -25,7 +25,7 @@ product=pd.DataFrame({
 result = pd.merge(customer, product, sort= False, on=[2, 0]) #default -> inner
 #print('result: ')
 #print(type(result))
-#print(result)
+print(result)
 
 '''
 customer2 = pd.DataFrame({
