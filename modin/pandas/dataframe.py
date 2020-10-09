@@ -41,7 +41,7 @@ from .utils import (
 )
 from .iterator import PartitionIterator
 from .series import Series
-from .base import BasePandasDataset
+from .base import BasePandasDataset, _ATTRS_NO_LOOKUP
 from .groupby import DataFrameGroupBy
 
 
@@ -459,6 +459,8 @@ class DataFrame(BasePandasDataset):
             if (
                 self._query_compiler.has_multiindex(axis=axis)
                 and by in self.axes[axis].names
+                or hasattr(self.axes[axis], "name")
+                and self.axes[axis].name == by
             ):
                 # In this case we pass the string value of the name through to the
                 # partitions. This is more efficient than broadcasting the values.
@@ -705,8 +707,43 @@ class DataFrame(BasePandasDataset):
         )
 
     def corr(self, method="pearson", min_periods=1):
-        return self._default_to_pandas(
-            pandas.DataFrame.corr, method=method, min_periods=min_periods
+        """
+        Compute pairwise correlation of columns, excluding NA/null values.
+
+        Parameters
+        ----------
+        method : {'pearson', 'kendall', 'spearman'} or callable
+            Method of correlation:
+
+            * pearson : standard correlation coefficient
+            * kendall : Kendall Tau correlation coefficient
+            * spearman : Spearman rank correlation
+            * callable: callable with input two 1d ndarrays
+                and returning a float. Note that the returned matrix from corr
+                will have 1 along the diagonals and will be symmetric
+                regardless of the callable's behavior.
+
+        min_periods : int, optional
+            Minimum number of observations required per pair of columns
+            to have a valid result. Currently only available for Pearson
+            and Spearman correlation.
+
+        Returns
+        -------
+        DataFrame
+            Correlation matrix.
+
+        Notes
+        -----
+        Correlation floating point precision may slightly differ from pandas.
+
+        For now pearson method is available only. For other methods defaults to pandas.
+        """
+        return self.__constructor__(
+            query_compiler=self._query_compiler.corr(
+                method=method,
+                min_periods=min_periods,
+            )
         )
 
     def corrwith(self, other, axis=0, drop=False, method="pearson"):
@@ -761,9 +798,7 @@ class DataFrame(BasePandasDataset):
             ]
         )
 
-        cols = numeric_df.columns
-        idx = cols.copy()
-        denom = None
+        is_notna = True
 
         if all(numeric_df.notna().all()):
             if min_periods is not None and min_periods > len(numeric_df):
@@ -771,20 +806,25 @@ class DataFrame(BasePandasDataset):
                 result.fill(np.nan)
                 return numeric_df.__constructor__(result)
             else:
+                cols = numeric_df.columns
+                idx = cols.copy()
                 numeric_df = numeric_df.astype(dtype="float64")
                 denom = 1.0 / (len(numeric_df) - ddof)
                 means = numeric_df.mean(axis=0)
                 result = numeric_df - means
                 result = result.T._query_compiler.conj().dot(result._query_compiler)
         else:
-            result = numeric_df._query_compiler.default_to_pandas(
-                pandas.DataFrame.cov, min_periods=min_periods, ddof=ddof
-            )
+            result = numeric_df._query_compiler.cov(min_periods=min_periods)
+            is_notna = False
 
-        result = numeric_df.__constructor__(
-            query_compiler=result, index=idx, columns=cols
-        )
-        return result if denom is None else result * denom
+        if is_notna:
+            result = numeric_df.__constructor__(
+                query_compiler=result, index=idx, columns=cols
+            )
+            result *= denom
+        else:
+            result = numeric_df.__constructor__(query_compiler=result)
+        return result
 
     def dot(self, other):
         """
@@ -1874,17 +1914,21 @@ class DataFrame(BasePandasDataset):
         margins_name="All",
         observed=False,
     ):
-        return self._default_to_pandas(
-            pandas.DataFrame.pivot_table,
-            values=values,
-            index=index,
-            columns=columns,
-            aggfunc=aggfunc,
-            fill_value=fill_value,
-            margins=margins,
-            dropna=dropna,
-            margins_name=margins_name,
+        result = DataFrame(
+            query_compiler=self._query_compiler.pivot_table(
+                index=index,
+                values=values,
+                columns=columns,
+                aggfunc=aggfunc,
+                fill_value=fill_value,
+                margins=margins,
+                dropna=dropna,
+                margins_name=margins_name,
+                observed=observed,
+            )
         )
+
+        return result
 
     @property
     def plot(
@@ -2071,20 +2115,22 @@ class DataFrame(BasePandasDataset):
         if index is not None or (mapper is not None and axis == 0):
             new_index = pandas.DataFrame(index=self.index).rename(**kwargs).index
         else:
-            new_index = self.index
+            new_index = None
         if columns is not None or (mapper is not None and axis == 1):
             new_columns = (
                 pandas.DataFrame(columns=self.columns).rename(**kwargs).columns
             )
         else:
-            new_columns = self.columns
+            new_columns = None
 
         if inplace:
             obj = self
         else:
             obj = self.copy()
-        obj.index = new_index
-        obj.columns = new_columns
+        if new_index is not None:
+            obj.index = new_index
+        if new_columns is not None:
+            obj.columns = new_columns
 
         if not inplace:
             return obj
@@ -3080,7 +3126,7 @@ class DataFrame(BasePandasDataset):
         try:
             return object.__getattribute__(self, key)
         except AttributeError as e:
-            if key in self.columns:
+            if key not in _ATTRS_NO_LOOKUP and key in self.columns:
                 return self[key]
             raise e
 

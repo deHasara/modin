@@ -36,6 +36,7 @@ from modin.pandas.test.utils import (
     test_data_resample,
     test_data,
     test_data_diff_dtype,
+    modin_df_almost_equals_pandas,
 )
 
 pd.DEFAULT_NPARTITIONS = 4
@@ -48,7 +49,6 @@ matplotlib.use("Agg")
     "op, make_args",
     [
         ("align", lambda df: {"other": df}),
-        ("corr", None),
         ("expanding", None),
         ("corrwith", lambda df: {"other": df}),
         ("explode", lambda df: {"column": df.columns[0]}),
@@ -63,7 +63,6 @@ matplotlib.use("Agg")
         ("pct_change", None),
         ("__getstate__", None),
         ("to_xarray", None),
-        ("pivot_table", lambda df: {"values": "int_col", "index": ["float_col"]}),
     ],
 )
 def test_ops_defaulting_to_pandas(op, make_args):
@@ -215,11 +214,35 @@ def test_combine_first():
     df_equals(modin_df1.combine_first(modin_df2), pandas_df1.combine_first(pandas_df2))
 
 
-def test_cov():
-    data = test_data_values[0]
-    modin_result = pd.DataFrame(data).cov()
-    pandas_result = pandas.DataFrame(data).cov()
-    df_equals(modin_result, pandas_result)
+@pytest.mark.parametrize("min_periods", [1, 3, 5])
+def test_corr(min_periods):
+    eval_general(
+        *create_test_dfs(test_data["int_data"]),
+        lambda df: df.corr(min_periods=min_periods),
+    )
+    # Modin result may slightly differ from pandas result
+    # due to floating pointing arithmetic.
+    eval_general(
+        *create_test_dfs(test_data["float_nan_data"]),
+        lambda df: df.corr(min_periods=min_periods),
+        comparator=modin_df_almost_equals_pandas,
+    )
+
+
+@pytest.mark.parametrize("min_periods", [1, 3, 5])
+@pytest.mark.parametrize("ddof", [1, 2, 4])
+def test_cov(min_periods, ddof):
+    eval_general(
+        *create_test_dfs(test_data["int_data"]),
+        lambda df: df.cov(min_periods=min_periods, ddof=ddof),
+    )
+    # Modin result may slightly differ from pandas result
+    # due to floating pointing arithmetic.
+    eval_general(
+        *create_test_dfs(test_data["float_nan_data"]),
+        lambda df: df.cov(min_periods=min_periods),
+        comparator=modin_df_almost_equals_pandas,
+    )
 
 
 @pytest.mark.parametrize("data", test_data_values, ids=test_data_keys)
@@ -475,6 +498,107 @@ def test_pivot(data, index, columns, values):
         columns=columns,
         values=values,
         check_exception_type=None,
+    )
+
+
+@pytest.mark.parametrize("data", [test_data["int_data"]], ids=["int_data"])
+@pytest.mark.parametrize(
+    "index",
+    [
+        lambda df: df.columns[0],
+        lambda df: [*df.columns[0:2], *df.columns[-7:-4]],
+        None,
+    ],
+)
+@pytest.mark.parametrize(
+    "columns",
+    [
+        lambda df: df.columns[len(df.columns) // 2],
+        lambda df: [
+            *df.columns[(len(df.columns) // 2) : (len(df.columns) // 2 + 4)],
+            df.columns[-7],
+        ],
+        None,
+    ],
+)
+@pytest.mark.parametrize(
+    "values", [lambda df: df.columns[-1], lambda df: df.columns[-4:-1], None]
+)
+def test_pivot_table_data(data, index, columns, values):
+    md_df, pd_df = create_test_dfs(data)
+
+    # when values is None the output will be huge-dimensional,
+    # so reducing dimension of testing data at that case
+    if values is None:
+        md_df, pd_df = md_df.iloc[:42, :42], pd_df.iloc[:42, :42]
+    eval_general(
+        md_df,
+        pd_df,
+        operation=lambda df, *args, **kwargs: df.pivot_table(
+            *args, **kwargs
+        ).sort_index(axis=int(index is not None)),
+        index=index,
+        columns=columns,
+        values=values,
+        check_exception_type=None,
+    )
+
+
+@pytest.mark.parametrize("data", [test_data["int_data"]], ids=["int_data"])
+@pytest.mark.parametrize(
+    "index",
+    [
+        lambda df: df.columns[0],
+        lambda df: [df.columns[0], df.columns[len(df.columns) // 2 - 1]],
+    ],
+)
+@pytest.mark.parametrize(
+    "columns",
+    [
+        lambda df: df.columns[len(df.columns) // 2],
+        lambda df: [
+            *df.columns[(len(df.columns) // 2) : (len(df.columns) // 2 + 4)],
+            df.columns[-7],
+        ],
+    ],
+)
+@pytest.mark.parametrize(
+    "values", [lambda df: df.columns[-1], lambda df: df.columns[-4:-1]]
+)
+@pytest.mark.parametrize(
+    "aggfunc",
+    [["mean", "sum"], lambda df: {df.columns[5]: "mean", df.columns[-5]: "sum"}],
+)
+@pytest.mark.parametrize("margins_name", ["Custom name", None])
+def test_pivot_table_margins(
+    data,
+    index,
+    columns,
+    values,
+    aggfunc,
+    margins_name,
+):
+    eval_general(
+        *create_test_dfs(data),
+        operation=lambda df, *args, **kwargs: df.pivot_table(*args, **kwargs),
+        index=index,
+        columns=columns,
+        values=values,
+        aggfunc=aggfunc,
+        margins=True,
+        margins_name=margins_name,
+    )
+
+
+@pytest.mark.parametrize("data", [test_data["int_data"]], ids=["int_data"])
+def test_pivot_table_dropna(data):
+    eval_general(
+        *create_test_dfs(data),
+        operation=lambda df, *args, **kwargs: df.pivot_table(*args, **kwargs),
+        index=lambda df: df.columns[0],
+        columns=lambda df: df.columns[1],
+        values=lambda df: df.columns[-1],
+        dropna=False,
     )
 
 
@@ -959,8 +1083,7 @@ def test_tz_localize():
 @pytest.mark.parametrize("is_multi_col", [True, False], ids=["col_multi", "col_index"])
 @pytest.mark.parametrize("data", test_data_values, ids=test_data_keys)
 def test_unstack(data, is_multi_idx, is_multi_col):
-    pandas_df = pandas.DataFrame(data)
-    modin_df = pd.DataFrame(data)
+    modin_df, pandas_df = create_test_dfs(data)
 
     if is_multi_idx:
         index = generate_multiindex(len(pandas_df), nlevels=4, is_tree_like=True)
@@ -974,16 +1097,12 @@ def test_unstack(data, is_multi_idx, is_multi_col):
     else:
         columns = pandas_df.columns
 
-    pandas_df.columns = columns
-    pandas_df.index = index
-
-    modin_df.columns = columns
-    modin_df.index = index
+    pandas_df.columns = modin_df.columns = columns
+    pandas_df.index = modin_df.index = index
 
     df_equals(modin_df.unstack(), pandas_df.unstack())
-
+    df_equals(modin_df.unstack(level=1), pandas_df.unstack(level=1))
     if is_multi_idx:
-        df_equals(modin_df.unstack(level=1), pandas_df.unstack(level=1))
         df_equals(modin_df.unstack(level=[0, 1]), pandas_df.unstack(level=[0, 1]))
         df_equals(modin_df.unstack(level=[0, 1, 2]), pandas_df.unstack(level=[0, 1, 2]))
         df_equals(
@@ -992,47 +1111,33 @@ def test_unstack(data, is_multi_idx, is_multi_col):
 
 
 @pytest.mark.parametrize(
-    "is_multi_col",
-    [
-        pytest.param(
-            True,
-            marks=pytest.mark.xfail(
-                reason="Unstack fails in case of MultiIndex columns. See #1997 for more details."
-            ),
-        ),
-        pytest.param(
-            False,
-            marks=pytest.mark.xfail(
-                reason="Unstack loses indices names. See issue #2084 for more details."
-            ),
-        ),
-    ],
-    ids=["col_multi", "col_index"],
+    "multi_col", ["col_multi_tree", "col_multi_not_tree", "col_index"]
 )
-def test_unstack_not_unique(is_multi_col):
-    MAX_NROWS = 34
-    MAX_NCOLS = 36
+@pytest.mark.parametrize(
+    "multi_idx", ["idx_multi_tree", "idx_multi_not_tree", "idx_index"]
+)
+def test_unstack_multiindex_types(multi_col, multi_idx):
+    MAX_NROWS = MAX_NCOLS = 36
 
     pandas_df = pandas.DataFrame(test_data["int_data"]).iloc[:MAX_NROWS, :MAX_NCOLS]
     modin_df = pd.DataFrame(test_data["int_data"]).iloc[:MAX_NROWS, :MAX_NCOLS]
 
-    index = generate_multiindex(len(pandas_df), nlevels=3)
+    def get_new_index(index, cond):
+        if cond == "col_multi_tree" or cond == "idx_multi_tree":
+            return generate_multiindex(len(index), nlevels=3, is_tree_like=True)
+        elif cond == "col_multi_not_tree" or cond == "idx_multi_not_tree":
+            return generate_multiindex(len(index), nlevels=3)
+        else:
+            return index
 
-    if is_multi_col:
-        columns = generate_multiindex(len(pandas_df.columns), nlevels=2)
-    else:
-        columns = pandas_df.columns
-
-    pandas_df.columns = columns
-    pandas_df.index = index
-
-    modin_df.columns = columns
-    modin_df.index = index
+    pandas_df.columns = modin_df.columns = get_new_index(pandas_df.columns, multi_col)
+    pandas_df.index = modin_df.index = get_new_index(pandas_df.index, multi_idx)
 
     df_equals(modin_df.unstack(), pandas_df.unstack())
     df_equals(modin_df.unstack(level=1), pandas_df.unstack(level=1))
-    df_equals(modin_df.unstack(level=[0, 1]), pandas_df.unstack(level=[0, 1]))
-    df_equals(modin_df.unstack(level=[0, 1, 2]), pandas_df.unstack(level=[0, 1, 2]))
+    if multi_idx != "idx_index":
+        df_equals(modin_df.unstack(level=[0, 1]), pandas_df.unstack(level=[0, 1]))
+        df_equals(modin_df.unstack(level=[0, 1, 2]), pandas_df.unstack(level=[0, 1, 2]))
 
 
 @pytest.mark.parametrize("data", test_data_values, ids=test_data_keys)

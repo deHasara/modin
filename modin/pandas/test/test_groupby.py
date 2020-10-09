@@ -15,39 +15,18 @@ import pytest
 import pandas
 import numpy as np
 import modin.pandas as pd
-from modin.utils import try_cast_to_pandas, to_pandas, get_current_backend
+from modin.utils import try_cast_to_pandas, get_current_backend
 from modin.pandas.utils import from_pandas
 from .utils import (
     df_equals,
     check_df_columns_have_nans,
     create_test_dfs,
     eval_general,
-    df_categories_equals,
     test_data_values,
+    modin_df_almost_equals_pandas,
 )
 
 pd.DEFAULT_NPARTITIONS = 4
-
-
-def modin_df_almost_equals_pandas(modin_df, pandas_df):
-    df_categories_equals(modin_df._to_pandas(), pandas_df)
-
-    modin_df = to_pandas(modin_df)
-
-    if hasattr(modin_df, "select_dtypes"):
-        modin_df = modin_df.select_dtypes(exclude=["category"])
-    if hasattr(pandas_df, "select_dtypes"):
-        pandas_df = pandas_df.select_dtypes(exclude=["category"])
-
-    difference = modin_df - pandas_df
-    diff_max = difference.max()
-    if isinstance(diff_max, pandas.Series):
-        diff_max = diff_max.max()
-    assert (
-        modin_df.equals(pandas_df)
-        or diff_max < 0.0001
-        or (all(modin_df.isna().all()) and all(pandas_df.isna().all()))
-    )
 
 
 def modin_groupby_equals_pandas(modin_groupby, pandas_groupby):
@@ -87,11 +66,20 @@ def test_mixed_dtypes_groupby(as_index):
         ("col1",),
         (lambda x: x % 2,),
         (modin_df["col0"].copy(), pandas_df["col0"].copy()),
+        ("col3",),
     ]
 
     for by in by_values:
-        modin_groupby = modin_df.groupby(by=by[0], as_index=as_index)
-        pandas_groupby = pandas_df.groupby(by=by[-1], as_index=as_index)
+        if by_values[0] == "col3":
+            modin_groupby = modin_df.set_index(by[0]).groupby(
+                by=by[0], as_index=as_index
+            )
+            pandas_groupby = pandas_df.set_index(by[0]).groupby(
+                by=by[-1], as_index=as_index
+            )
+        else:
+            modin_groupby = modin_df.groupby(by=by[0], as_index=as_index)
+            pandas_groupby = pandas_df.groupby(by=by[-1], as_index=as_index)
 
         modin_groupby_equals_pandas(modin_groupby, pandas_groupby)
         eval_ngroups(modin_groupby, pandas_groupby)

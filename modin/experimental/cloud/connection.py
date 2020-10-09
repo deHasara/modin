@@ -37,10 +37,16 @@ class Connection:
         except subprocess.TimeoutExpired:
             return None
 
-    def __init__(self, details: ConnectionDetails, main_python: str, log_rpyc=None):
-        if log_rpyc is None:
-            log_rpyc = os.environ.get("MODIN_LOG_RPYC", "").title() == "True"
+    def __init__(
+        self, details: ConnectionDetails, main_python: str, wrap_cmd=None, log_rpyc=None
+    ):
+        self.log_rpyc = (
+            log_rpyc
+            if log_rpyc is not None
+            else os.environ.get("MODIN_LOG_RPYC", "").title() == "True"
+        )
         self.proc = None
+        self.wrap_cmd = wrap_cmd or subprocess.list2cmdline
 
         # find where rpyc_classic is located
         locator = self._run(
@@ -70,7 +76,7 @@ class Connection:
             main_python,
             rpyc_classic,
         ]
-        if log_rpyc:
+        if self.log_rpyc:
             cmd.extend(["--logfile", f"{tempfile.gettempdir()}/rpyc.log"])
         for _ in range(self.tries):
             proc = self._run(
@@ -78,7 +84,7 @@ class Connection:
                 cmd + ["--port", str(port)],
                 capture_out=False,
             )
-            if self.__wait_noexc(proc, 1) is None:
+            if self.__wait_noexc(proc, 3) is None:
                 # started successfully
                 self.proc = proc
                 self.rpyc_port = port
@@ -186,11 +192,17 @@ class Connection:
 
         return cmdline
 
-    @staticmethod
-    def _run(sshcmd: list, cmd: list, capture_out: bool = True):
-        redirect = subprocess.PIPE if capture_out else subprocess.DEVNULL
+    def _redirect(self, capture_out):
+        if capture_out:
+            return subprocess.PIPE
+        if self.log_rpyc:
+            return open(f"{tempfile.gettempdir()}/rpyc.out", "a")
+        return subprocess.DEVNULL
+
+    def _run(self, sshcmd: list, cmd: list, capture_out: bool = True):
+        redirect = self._redirect(capture_out)
         return subprocess.Popen(
-            sshcmd + [subprocess.list2cmdline(cmd)],
+            sshcmd + [self.wrap_cmd(cmd)],
             stdin=subprocess.DEVNULL,
             stdout=redirect,
             stderr=redirect,

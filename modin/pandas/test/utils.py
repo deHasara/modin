@@ -548,6 +548,27 @@ def df_equals(df1, df2):
             np.testing.assert_almost_equal(df1, df2)
 
 
+def modin_df_almost_equals_pandas(modin_df, pandas_df):
+    df_categories_equals(modin_df._to_pandas(), pandas_df)
+
+    modin_df = to_pandas(modin_df)
+
+    if hasattr(modin_df, "select_dtypes"):
+        modin_df = modin_df.select_dtypes(exclude=["category"])
+    if hasattr(pandas_df, "select_dtypes"):
+        pandas_df = pandas_df.select_dtypes(exclude=["category"])
+
+    difference = modin_df - pandas_df
+    diff_max = difference.max()
+    if isinstance(diff_max, pandas.Series):
+        diff_max = diff_max.max()
+    assert (
+        modin_df.equals(pandas_df)
+        or diff_max < 0.0001
+        or (all(modin_df.isna().all()) and all(pandas_df.isna().all()))
+    )
+
+
 def df_is_empty(df):
     """Tests if df is empty.
 
@@ -717,17 +738,19 @@ def generate_multiindex(elements_number, nlevels=2, is_tree_like=False):
 
         lvl_len = int(lvl_len_d)
         result = pd.MultiIndex.from_product(
-            [generate_level(lvl_len, i) for i in range(nlevels - penalty_level)]
+            [generate_level(lvl_len, i) for i in range(nlevels - penalty_level)],
+            names=[f"level-{i}" for i in range(nlevels - penalty_level)],
         )
         if penalty_level:
             result = pd.MultiIndex.from_tuples(
-                [("base_level", *ml_tuple) for ml_tuple in result]
+                [("base_level", *ml_tuple) for ml_tuple in result],
+                names=[f"level-{i}" for i in range(nlevels)],
             )
         return result.sort_values()
     else:
-        base_level = ["first"] * (elements_number // 2) + ["second"] * (
-            elements_number // 2
-        )
+        base_level = ["first"] * (elements_number // 2 + elements_number % 2) + [
+            "second"
+        ] * (elements_number // 2)
         primary_levels = [generate_level(elements_number, i) for i in range(1, nlevels)]
         arrays = [base_level] + primary_levels
         return pd.MultiIndex.from_tuples(

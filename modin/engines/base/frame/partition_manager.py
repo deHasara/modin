@@ -75,6 +75,14 @@ class BaseFrameManager(object):
         return [cls._row_partition_class(row) for row in partitions]
 
     @classmethod
+    def axis_partition(cls, partitions, axis):
+        return (
+            cls.column_partitions(partitions)
+            if not axis
+            else cls.row_partitions(partitions)
+        )
+
+    @classmethod
     def groupby_reduce(cls, axis, partitions, by, map_func, reduce_func):
         mapped_partitions = cls.broadcast_apply(
             axis, map_func, left=partitions, right=by, other_name="other"
@@ -199,6 +207,60 @@ class BaseFrameManager(object):
         return new_partitions
 
     @classmethod
+    def broadcast_axis_partitions(
+        cls,
+        axis,
+        apply_func,
+        left,
+        right,
+        keep_partitioning=False,
+    ):
+        """
+        Broadcast the right partitions to left and apply a function along full axis.
+
+        Parameters
+        ----------
+            axis : The axis to apply and broadcast over.
+            apply_func : The function to apply.
+            left : The left partitions.
+            right : The right partitions.
+            keep_partitioning : boolean. Default is False
+                The flag to keep partitions for Modin Frame.
+
+        Returns
+        -------
+            A new `np.array` of partition objects.
+        """
+        # Since we are already splitting the DataFrame back up after an
+        # operation, we will just use this time to compute the number of
+        # partitions as best we can right now.
+        if keep_partitioning:
+            num_splits = len(left) if axis == 0 else len(left.T)
+        else:
+            num_splits = cls._compute_num_partitions()
+        preprocessed_map_func = cls.preprocess_func(apply_func)
+        left_partitions = cls.axis_partition(left, axis)
+        right_partitions = None if right is None else cls.axis_partition(right, axis)
+        # For mapping across the entire axis, we don't maintain partitioning because we
+        # may want to line to partitioning up with another BlockPartitions object. Since
+        # we don't need to maintain the partitioning, this gives us the opportunity to
+        # load-balance the data as well.
+        result_blocks = np.array(
+            [
+                part.apply(
+                    preprocessed_map_func,
+                    num_splits=num_splits,
+                    other_axis_partition=right_partitions,
+                )
+                for part in left_partitions
+            ]
+        )
+        # If we are mapping over columns, they are returned to use the same as
+        # rows, so we need to transpose the returned 2D NumPy array to return
+        # the structure to the correct order.
+        return result_blocks.T if not axis else result_blocks
+
+    @classmethod
     def map_partitions(cls, partitions, map_func):
         """Applies `map_func` to every partition.
 
@@ -227,7 +289,13 @@ class BaseFrameManager(object):
         )
 
     @classmethod
-    def map_axis_partitions(cls, axis, partitions, map_func, keep_partitioning=False):
+    def map_axis_partitions(
+        cls,
+        axis,
+        partitions,
+        map_func,
+        keep_partitioning=False,
+    ):
         """
         Applies `map_func` to every partition.
 
@@ -252,26 +320,46 @@ class BaseFrameManager(object):
         This method should be used in the case that `map_func` relies on
         some global information about the axis.
         """
-        # Since we are already splitting the DataFrame back up after an
-        # operation, we will just use this time to compute the number of
-        # partitions as best we can right now.
-        if keep_partitioning:
-            num_splits = len(partitions) if axis == 0 else len(partitions.T)
-        else:
-            num_splits = cls._compute_num_partitions()
-        preprocessed_map_func = cls.preprocess_func(map_func)
-        partitions = (
-            cls.column_partitions(partitions)
-            if not axis
-            else cls.row_partitions(partitions)
+        return cls.broadcast_axis_partitions(
+            axis=axis,
+            left=partitions,
+            apply_func=map_func,
+            keep_partitioning=keep_partitioning,
+            right=None,
         )
+
+    @classmethod
+    def simple_shuffle(cls, axis, partitions, map_func, lengths):
+        """
+        Shuffle data using `lengths` via `map_func`
+
+        Parameters
+        ----------
+            axis : 0 or 1
+                The axis to perform the map across (0 - index, 1 - columns).
+            partitions : NumPy array
+                The partitions of Modin Frame.
+            map_func : callable
+                The function to apply.
+            lengths : list(int)
+                The list of lengths to shuffle the object
+
+        Returns
+        -------
+        NumPy array
+            An array of new partitions for a Modin Frame.
+        """
+        preprocessed_map_func = cls.preprocess_func(map_func)
+        partitions = cls.axis_partition(partitions, axis)
         # For mapping across the entire axis, we don't maintain partitioning because we
         # may want to line to partitioning up with another BlockPartitions object. Since
         # we don't need to maintain the partitioning, this gives us the opportunity to
         # load-balance the data as well.
         result_blocks = np.array(
             [
-                part.apply(preprocessed_map_func, num_splits=num_splits)
+                part.apply(
+                    preprocessed_map_func, _lengths=lengths, manual_partition=True
+                )
                 for part in partitions
             ]
         )

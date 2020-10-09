@@ -99,6 +99,7 @@ class BaseCluster:
 
     target_engine = None
     target_partition = None
+    wrap_cmd = None
     Connector = Connection
 
     def __init__(
@@ -109,6 +110,7 @@ class BaseCluster:
         worker_count: int = 4,
         head_node_type: str = None,
         worker_node_type: str = None,
+        add_conda_packages: list = None,
     ):
         """
         Prepare the cluster manager. It needs to know a few things:
@@ -117,6 +119,7 @@ class BaseCluster:
             * cluster name
             * worker count
             * head and worker node instance types (can be omitted to default to provider-defined)
+            * custom conda packages for remote environment
         """
 
         self.provider = provider
@@ -125,6 +128,7 @@ class BaseCluster:
         self.worker_count = worker_count
         self.head_node_type = head_node_type or provider.default_head_type
         self.worker_node_type = worker_node_type or provider.default_worker_type
+        self.add_conda_packages = add_conda_packages
 
         self.old_backends = None
         self.connection: Connection = None
@@ -142,7 +146,9 @@ class BaseCluster:
             # cluster is ready now
             if self.connection is None:
                 self.connection = self.Connector(
-                    self._get_connection_details(), self._get_main_python()
+                    self._get_connection_details(),
+                    self._get_main_python(),
+                    self.wrap_cmd,
                 )
 
     def destroy(self, wait=False):
@@ -208,7 +214,8 @@ def create(
     workers: int = 4,
     head_node: str = None,
     worker_node: str = None,
-    __spawner__: str = "rayscale",
+    add_conda_packages: list = None,
+    cluster_type: str = "rayscale",
 ) -> BaseCluster:
     """
     Creates an instance of a cluster with desired characteristics in a cloud.
@@ -243,9 +250,11 @@ def create(
         What machine type to use for head node in the cluster.
     worker_node : str, optional
         What machine type to use for worker nodes in the cluster.
-    __spawner__ : str, optional, internal
+    add_conda_packages : list, optional
+        Custom conda packages for remote environments.
+    cluster_type : str, optional
         How to spawn the cluster.
-        Currently only spawning by Ray autoscaler ("rayscale") is supported
+        Currently spawning by Ray autoscaler ("rayscale" for general and "omnisci" for Omnisci-based) is supported
 
     Returns
     -------
@@ -262,7 +271,7 @@ def create(
 
     Using SOCKS proxy requires Ray newer than 0.8.6, which might need to be installed manually.
     """
-    if not isinstance(provider, Provider) and __spawner__ != "local":
+    if not isinstance(provider, Provider) and cluster_type != "local":
         provider = Provider(
             name=provider,
             credentials_file=credentials,
@@ -276,12 +285,14 @@ def create(
                 "Ignoring credentials, region, zone and image parameters because provider is specified as Provider descriptor, not as name",
                 UserWarning,
             )
-    if __spawner__ == "rayscale":
+    if cluster_type == "rayscale":
         from .rayscale import RayCluster as Spawner
-    elif __spawner__ == "local":
+    elif cluster_type == "omnisci":
+        from .omnisci import RemoteOmnisci as Spawner
+    elif cluster_type == "local":
         from .local_cluster import LocalCluster as Spawner
     else:
-        raise ValueError(f"Unknown spawner: {__spawner__}")
+        raise ValueError(f"Unknown cluster type: {cluster_type}")
     instance = Spawner(
         provider,
         project_name,
@@ -289,6 +300,7 @@ def create(
         worker_count=workers,
         head_node_type=head_node,
         worker_node_type=worker_node,
+        add_conda_packages=add_conda_packages,
     )
     instance.spawn(wait=False)
     return instance

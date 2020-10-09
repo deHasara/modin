@@ -270,6 +270,12 @@ class BaseQueryCompiler(abc.ABC):
     def mul(self, other, **kwargs):
         return BinaryDefault.register(pandas.DataFrame.mul)(self, other=other, **kwargs)
 
+    def corr(self, **kwargs):
+        return DataFrameDefault.register(pandas.DataFrame.corr)(self, **kwargs)
+
+    def cov(self, **kwargs):
+        return DataFrameDefault.register(pandas.DataFrame.cov)(self, **kwargs)
+
     def dot(self, other, **kwargs):
         if kwargs.get("squeeze_self", False):
             applyier = pandas.Series.dot
@@ -1419,6 +1425,31 @@ class BaseQueryCompiler(abc.ABC):
     def pivot(self, index, columns, values):
         return DataFrameDefault.register(pandas.DataFrame.pivot)(
             self, index=index, columns=columns, values=values
+        )
+
+    def pivot_table(
+        self,
+        index,
+        values,
+        columns,
+        aggfunc,
+        fill_value,
+        margins,
+        dropna,
+        margins_name,
+        observed,
+    ):
+        return DataFrameDefault.register(pandas.DataFrame.pivot_table)(
+            self,
+            index=index,
+            values=values,
+            columns=columns,
+            aggfunc=aggfunc,
+            fill_value=fill_value,
+            margins=margins,
+            dropna=dropna,
+            margins_name=margins_name,
+            observed=observed,
         )
 
     def get_dummies(self, columns, **kwargs):

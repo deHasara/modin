@@ -49,10 +49,11 @@ class LocalConnection(Connection):
     def _build_sshcmd(self, details: ConnectionDetails, forward_port: int = None):
         return []
 
-    @staticmethod
-    def _run(sshcmd: list, cmd: list, capture_out: bool = True):
+    def _run(self, sshcmd: list, cmd: list, capture_out: bool = True):
         assert not sshcmd, "LocalConnection does not support running things via ssh"
-        redirect = subprocess.PIPE if capture_out else subprocess.DEVNULL
+        redirect = self._redirect(capture_out)
+        if not capture_out and hasattr(redirect, "write"):
+            redirect.write(f"Running: {cmd}\n")
         return subprocess.Popen(
             cmd,
             stdin=subprocess.DEVNULL,
@@ -82,6 +83,7 @@ class LocalCluster(BaseCluster):
         worker_count=_UNUSED,
         head_node_type=_UNUSED,
         worker_node_type=_UNUSED,
+        add_conda_packages=_UNUSED,
     ):
         assert (
             provider == "local"
@@ -94,6 +96,7 @@ class LocalCluster(BaseCluster):
                 worker_count,
                 head_node_type,
                 worker_node_type,
+                add_conda_packages,
             )
         ):
             warnings.warn(

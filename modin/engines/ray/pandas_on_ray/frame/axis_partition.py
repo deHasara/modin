@@ -43,12 +43,12 @@ class PandasOnRayFrameAxisPartition(PandasFrameAxisPartition):
                 maintain_partitioning,
             )
             + tuple(partitions),
-            num_return_vals=num_splits * 3,
+            num_returns=num_splits * 3,
         )
 
     @classmethod
     def deploy_func_between_two_axis_partitions(
-        cls, axis, func, num_splits, len_of_left, kwargs, *partitions
+        cls, axis, func, num_splits, len_of_left, other_shape, kwargs, *partitions
     ):
         return deploy_ray_func._remote(
             args=(
@@ -57,10 +57,11 @@ class PandasOnRayFrameAxisPartition(PandasFrameAxisPartition):
                 func,
                 num_splits,
                 len_of_left,
+                other_shape,
                 kwargs,
             )
             + tuple(partitions),
-            num_return_vals=num_splits * 3,
+            num_returns=num_splits * 3,
         )
 
     def _wrap_partitions(self, partitions):

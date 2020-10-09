@@ -87,7 +87,7 @@ import threading
 import os
 import multiprocessing
 
-from .. import execution_engine, Publisher
+from .. import execution_engine, partition_format, Publisher
 
 # Set this so that Pandas doesn't try to multithread by itself
 os.environ["OMP_NUM_THREADS"] = "1"
@@ -103,12 +103,17 @@ _NOINIT_ENGINES = {
 
 
 def _update_engine(publisher: Publisher):
-    global DEFAULT_NPARTITIONS, dask_client, num_cpus
+    global DEFAULT_NPARTITIONS, dask_client, num_cpus, partition_format
 
     if publisher.get() == "Ray":
         import ray
         from modin.engines.ray.utils import initialize_ray
 
+        # With OmniSci backend there is only a single worker per node
+        # and we allow it to work on all cores.
+        if partition_format.get() == "Omnisci":
+            os.environ["MODIN_CPUS"] = "1"
+            os.environ["OMP_NUM_THREADS"] = str(multiprocessing.cpu_count())
         if _is_first_update.get("Ray", True):
             initialize_ray()
         num_cpus = ray.cluster_resources()["CPU"]
@@ -140,22 +145,26 @@ def _update_engine(publisher: Publisher):
         if _is_first_update.get("Cloudray", True):
 
             @conn.teleport
-            def init_remote_ray():
+            def init_remote_ray(partition):
                 from ray import ray_constants
                 import modin
                 from modin.engines.ray.utils import initialize_ray
 
-                modin.set_backends("Ray")
+                modin.set_backends("Ray", partition)
                 initialize_ray(
                     override_is_cluster=True,
                     override_redis_address=f"localhost:{ray_constants.DEFAULT_PORT}",
                     override_redis_password=ray_constants.REDIS_DEFAULT_PASSWORD,
                 )
 
-            init_remote_ray()
+            init_remote_ray(partition_format.get())
             # import EngineDispatcher here to initialize IO class
             # so it doesn't skew read_csv() timings later on
             import modin.data_management.factories.dispatcher  # noqa: F401
+        else:
+            get_connection().modules["modin"].set_backends(
+                "Ray", partition_format.get()
+            )
 
         num_cpus = remote_ray.cluster_resources()["CPU"]
     elif publisher.get() == "Cloudpython":

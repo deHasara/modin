@@ -34,6 +34,10 @@ def _tuplize(arg):
     return tuple(arg)
 
 
+def _pickled_array(obj):
+    return pickle.dumps(obj.__array__())
+
+
 _TRACE_RPYC = os.environ.get("MODIN_TRACE_RPYC", "").title() == "True"
 
 
@@ -45,6 +49,7 @@ class WrappingConnection(rpyc.Connection):
         self._static_cache = collections.defaultdict(dict)
         self._remote_dumps = None
         self._remote_tuplize = None
+        self._remote_pickled_array = None
 
     def __wrap(self, local_obj):
         while True:
@@ -90,7 +95,9 @@ class WrappingConnection(rpyc.Connection):
                 remote = object.__getattribute__(remote, "__remote_end__")
             except AttributeError:
                 break
-        return pickle.loads(self._remote_dumps(remote))
+        if isinstance(remote, netref.BaseNetref) and remote.____conn__ is self:
+            return pickle.loads(self._remote_dumps(remote))
+        return remote
 
     def obtain_tuple(self, remote):
         while True:
@@ -173,6 +180,45 @@ class WrappingConnection(rpyc.Connection):
                 return res
         return super().async_request(handler, *args, **kw)
 
+    def __patched_netref(self, id_pack):
+        """
+        Default RPyC behaviour is to defer almost everything to be always obtained
+        from remote side. This is almost always correct except when Python behaves
+        strangely. For example, when checking for isinstance() or issubclass() it
+        gets obj.__bases__ tuple and uses its elements *after* calling a decref
+        on the __bases__, because Python assumes that the class type holds
+        a reference to __bases__, which isn't true for RPyC proxy classes, so in
+        RPyC case the element gets destroyed and undefined behaviour happens.
+
+        So we're patching RPyC netref __getattribute__ to keep a reference
+        for certain read-only properties to better emulate local objects.
+
+        Also __array__() implementation works only for numpy arrays, but not other types,
+        like scalars (which should become arrays)
+        """
+        result = super()._netref_factory(id_pack)
+        cls = type(result)
+        if not hasattr(cls, "__readonly_cache__"):
+            orig_getattribute = cls.__getattribute__
+            type.__setattr__(cls, "__readonly_cache__", {})
+
+            def __getattribute__(this, name):
+                if name in {"__bases__", "__base__", "__mro__"}:
+                    cache = object.__getattribute__(this, "__readonly_cache__")
+                    try:
+                        return cache[name]
+                    except KeyError:
+                        res = cache[name] = orig_getattribute(this, name)
+                        return res
+                return orig_getattribute(this, name)
+
+            def __array__(this):
+                return pickle.loads(self._remote_pickled_array(this))
+
+            cls.__getattribute__ = __getattribute__
+            cls.__array__ = __array__
+        return result
+
     def _netref_factory(self, id_pack):
         id_name, cls_id, inst_id = id_pack
         id_name = str(id_name)
@@ -181,12 +227,12 @@ class WrappingConnection(rpyc.Connection):
             try:
                 cached_cls = self._remote_cls_cache[(id_name, cls_id)]
             except KeyError:
-                result = super()._netref_factory(id_pack)
+                result = self.__patched_netref(id_pack)
                 self._remote_cls_cache[(id_name, cls_id)] = type(result)
             else:
                 result = cached_cls(self, id_pack)
         else:
-            result = super()._netref_factory(id_pack)
+            result = self.__patched_netref(id_pack)
         # try getting __real_cls__ from result.__class__ BUT make sure to
         # NOT get it from some parent class for result.__class__, otherwise
         # multiple wrappings happen
@@ -225,13 +271,11 @@ class WrappingConnection(rpyc.Connection):
         return super()._box(obj)
 
     def _init_deliver(self):
-        self._remote_batch_loads = self.modules[
-            "modin.experimental.cloud.rpyc_proxy"
-        ]._batch_loads
+        remote_proxy = self.modules["modin.experimental.cloud.rpyc_proxy"]
+        self._remote_batch_loads = remote_proxy._batch_loads
         self._remote_dumps = self.modules["rpyc.lib.compat"].pickle.dumps
-        self._remote_tuplize = self.modules[
-            "modin.experimental.cloud.rpyc_proxy"
-        ]._tuplize
+        self._remote_tuplize = remote_proxy._tuplize
+        self._remote_pickled_array = remote_proxy._pickled_array
 
 
 class WrappingService(rpyc.ClassicService):
@@ -587,7 +631,17 @@ def make_dataframe_wrapper(DataFrame):
 
     DeliveringDataFrame = _deliveringWrapper(
         DataFrame,
-        ["groupby", "agg", "aggregate", "__getitem__", "astype", "drop", "merge"],
+        [
+            "groupby",
+            "agg",
+            "aggregate",
+            "__getitem__",
+            "astype",
+            "drop",
+            "merge",
+            "apply",
+            "applymap",
+        ],
         DataFrameOverrides,
         "DataFrame",
     )
@@ -628,4 +682,4 @@ def make_series_wrapper(Series):
     are overridded here, so what it mostly does is it produces a wrapper class
     inherited from normal Series but wrapping all access to remote end transparently.
     """
-    return _deliveringWrapper(Series, target_name="Series")
+    return _deliveringWrapper(Series, ["apply"], target_name="Series")

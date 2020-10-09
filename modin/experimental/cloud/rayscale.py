@@ -17,6 +17,7 @@ import traceback
 import sys
 from hashlib import sha1
 from typing import Callable
+import subprocess
 
 import yaml
 from ray.autoscaler.commands import (
@@ -133,7 +134,49 @@ class RayCluster(BaseCluster):
         config["worker_nodes"][instance_key] = self.worker_node_type
         config["worker_nodes"][image_key] = self.provider.image
 
+        # NOTE: setup_commands may be list with several sets of shell commands
+        # this change only first set defining the remote environment
+        res = self._update_conda_requirements(config["setup_commands"][0])
+        config["setup_commands"][0] = res
+
         return _bootstrap_config(config)
+
+    def _conda_requirements(self):
+        import shlex
+
+        reqs = []
+
+        reqs.extend(self._get_python_version())
+
+        reqs.append(self._get_modin_version())
+
+        if self.add_conda_packages:
+            reqs.extend(self.add_conda_packages)
+
+        # this is needed, for example, for dependencies that
+        # looks like: "scikit-learn>=0.23"
+        reqs_with_quotes = [shlex.quote(req) for req in reqs]
+
+        return reqs_with_quotes
+
+    def _update_conda_requirements(self, setup_commands: str):
+        return setup_commands.replace(
+            "{{CONDA_PACKAGES}}", " ".join(self._conda_requirements())
+        )
+
+    @staticmethod
+    def _get_python_version():
+        major = sys.version_info.major
+        minor = sys.version_info.minor
+        micro = sys.version_info.micro
+        return [f"python>={major}.{minor}", f"python<={major}.{minor}.{micro}"]
+
+    @staticmethod
+    def _get_modin_version():
+        from modin import __version__
+
+        # for example: 0.8.0+116.g5e50eef.dirty
+        return f"modin=={__version__.split('+')[0]}"
 
     @staticmethod
     def __save_config(config):
@@ -209,3 +252,16 @@ class RayCluster(BaseCluster):
         Gets the path to 'main' interpreter (the one that houses created environment for running everything)
         """
         return "~/miniconda/envs/modin/bin/python"
+
+    def wrap_cmd(self, cmd: list):
+        """
+        Wraps command into required incantation for bash to read ~/.bashrc which is needed
+        to make "conda foo" commands work
+        """
+        return subprocess.list2cmdline(
+            [
+                "bash",
+                "-ic",
+                subprocess.list2cmdline(["conda", "run", "-n", "modin"] + cmd),
+            ]
+        )

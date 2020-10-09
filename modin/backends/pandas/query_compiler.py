@@ -1100,13 +1100,16 @@ class PandasQueryCompiler(BaseQueryCompiler):
         def map_func(df):
             return pandas.DataFrame(df.unstack(level=level, fill_value=fill_value))
 
-        is_correct_len = True
-        if isinstance(self.index, pandas.MultiIndex):
+        def is_tree_like_or_1d(calc_index, valid_index):
+            if not isinstance(calc_index, pandas.MultiIndex):
+                return True
             actual_len = 1
-            for lvl in self.index.levels:
+            for lvl in calc_index.levels:
                 actual_len *= len(lvl)
-            if len(self.index) * len(self.columns) != actual_len * len(self.columns):
-                is_correct_len = False
+            return len(self.index) * len(self.columns) == actual_len * len(valid_index)
+
+        is_tree_like_or_1d_index = is_tree_like_or_1d(self.index, self.columns)
+        is_tree_like_or_1d_cols = is_tree_like_or_1d(self.columns, self.index)
 
         is_all_multi_list = False
         if (
@@ -1114,7 +1117,8 @@ class PandasQueryCompiler(BaseQueryCompiler):
             and isinstance(self.columns, pandas.MultiIndex)
             and is_list_like(level)
             and len(level) == self.index.nlevels
-            and is_correct_len
+            and is_tree_like_or_1d_index
+            and is_tree_like_or_1d_cols
         ):
             is_all_multi_list = True
             real_cols_bkp = self.columns
@@ -1148,7 +1152,7 @@ class PandasQueryCompiler(BaseQueryCompiler):
             )
             return pandas.MultiIndex.from_product([*new_columns, *new_index])
 
-        if is_all_multi_list and is_correct_len:
+        if is_all_multi_list and is_tree_like_or_1d_index and is_tree_like_or_1d_cols:
             result = result.sort_index()
             index_level_values = [lvl for lvl in obj.index.levels]
 
@@ -1158,7 +1162,7 @@ class PandasQueryCompiler(BaseQueryCompiler):
             return result
 
         if need_reindex:
-            if is_correct_len:
+            if is_tree_like_or_1d_index and is_tree_like_or_1d_cols:
                 is_recompute_index = isinstance(self.index, pandas.MultiIndex)
                 is_recompute_columns = not is_recompute_index and isinstance(
                     self.columns, pandas.MultiIndex
@@ -1166,18 +1170,32 @@ class PandasQueryCompiler(BaseQueryCompiler):
                 new_index = compute_index(
                     self.index, self.columns, is_recompute_index, is_recompute_columns
                 )
-            else:
-                if isinstance(self.columns, pandas.MultiIndex):
-                    new_index = compute_index(self.index, self.columns)
+            elif is_tree_like_or_1d_index != is_tree_like_or_1d_cols:
+                if isinstance(self.columns, pandas.MultiIndex) or not isinstance(
+                    self.index, pandas.MultiIndex
+                ):
+                    return result
                 else:
+                    index = (
+                        self.index.sortlevel()[0]
+                        if is_tree_like_or_1d_index
+                        and not is_tree_like_or_1d_cols
+                        and isinstance(self.index, pandas.MultiIndex)
+                        else self.index
+                    )
                     index = pandas.MultiIndex.from_tuples(
-                        list(self.index) * len(self.columns)
+                        list(index) * len(self.columns)
                     )
                     columns = self.columns.repeat(len(self.index))
                     index_levels = [
                         index.get_level_values(i) for i in range(index.nlevels)
                     ]
-                    new_index = pandas.MultiIndex.from_arrays([columns] + index_levels)
+                    new_index = pandas.MultiIndex.from_arrays(
+                        [columns] + index_levels,
+                        names=self.columns.names + self.index.names,
+                    )
+            else:
+                return result
             result = result.reindex(0, new_index)
         return result
 
@@ -1208,6 +1226,9 @@ class PandasQueryCompiler(BaseQueryCompiler):
     invert = MapFunction.register(pandas.DataFrame.__invert__)
     isin = MapFunction.register(pandas.DataFrame.isin, dtypes=np.bool)
     isna = MapFunction.register(pandas.DataFrame.isna, dtypes=np.bool)
+    _isfinite = MapFunction.register(
+        lambda df, *args, **kwargs: pandas.DataFrame(np.isfinite(df))
+    )
     negative = MapFunction.register(pandas.DataFrame.__neg__)
     notna = MapFunction.register(pandas.DataFrame.notna, dtypes=np.bool)
     round = MapFunction.register(pandas.DataFrame.round)
@@ -1570,6 +1591,91 @@ class PandasQueryCompiler(BaseQueryCompiler):
         else:
             new_modin_frame = self._modin_frame._map(lambda df: df.clip(**kwargs))
         return self.__constructor__(new_modin_frame)
+
+    def corr(self, method="pearson", min_periods=1):
+        if method == "pearson":
+            numeric_self = self.drop(
+                columns=[
+                    i for i in self.dtypes.index if not is_numeric_dtype(self.dtypes[i])
+                ]
+            )
+            return numeric_self._nancorr(min_periods=min_periods)
+        else:
+            return super().corr(method=method, min_periods=min_periods)
+
+    def cov(self, min_periods=None):
+        return self._nancorr(min_periods=min_periods, cov=True)
+
+    def _nancorr(self, min_periods=1, cov=False):
+        """
+        Compute either pairwise covariance or pairwise correlation of columns,
+        considering NA/null values the same like pandas does.
+
+        Parameters
+        ----------
+        min_periods : int, default 1
+            Minimum number of observations required per pair of columns
+            to have a valid result.
+        cov : boolean, default False
+            Either covariance or correlation should be computed.
+
+        Returns
+        -------
+        PandasQueryCompiler
+            The covariance or correlation matrix of the series of the DataFrame.
+        """
+        other = self.to_numpy()
+        other_mask = self._isfinite().to_numpy()
+        n_cols = other.shape[1]
+
+        if min_periods is None:
+            min_periods = 1
+
+        def map_func(df):
+            df = df.to_numpy()
+            n_rows = df.shape[0]
+            df_mask = np.isfinite(df)
+
+            result = np.empty((n_rows, n_cols), dtype=np.float64)
+
+            for i in range(n_rows):
+                df_ith_row = df[i]
+                df_ith_mask = df_mask[i]
+
+                for j in range(n_cols):
+                    other_jth_col = other[:, j]
+
+                    valid = df_ith_mask & other_mask[:, j]
+
+                    vx = df_ith_row[valid]
+                    vy = other_jth_col[valid]
+
+                    nobs = len(vx)
+
+                    if nobs < min_periods:
+                        result[i, j] = np.nan
+                    else:
+                        vx = vx - vx.mean()
+                        vy = vy - vy.mean()
+                        sumxy = (vx * vy).sum()
+                        sumxx = (vx * vx).sum()
+                        sumyy = (vy * vy).sum()
+
+                        denom = (nobs - 1.0) if cov else np.sqrt(sumxx * sumyy)
+                        if denom != 0:
+                            result[i, j] = sumxy / denom
+                        else:
+                            result[i, j] = np.nan
+
+            return pandas.DataFrame(result)
+
+        columns = self.columns
+        index = columns.copy()
+        transponed_self = self.transpose()
+        new_modin_frame = transponed_self._modin_frame._apply_full_axis(
+            1, map_func, new_index=index, new_columns=columns
+        )
+        return transponed_self.__constructor__(new_modin_frame)
 
     def dot(self, other, squeeze_self=None, squeeze_other=None):
         """
@@ -2506,6 +2612,84 @@ class PandasQueryCompiler(BaseQueryCompiler):
             unstacked.columns = unstacked.columns.droplevel(0)
 
         return unstacked
+
+    def pivot_table(
+        self,
+        index,
+        values,
+        columns,
+        aggfunc,
+        fill_value,
+        margins,
+        dropna,
+        margins_name,
+        observed,
+    ):
+        ErrorMessage.missmatch_with_pandas(
+            operation="pivot_table",
+            message="Order of columns could be different from pandas",
+        )
+
+        from pandas.core.reshape.pivot import _convert_by
+
+        def __convert_by(by):
+            if isinstance(by, pandas.Index):
+                return list(by)
+            return _convert_by(by)
+
+        index, columns, values = map(__convert_by, [index, columns, values])
+
+        unique_keys = np.unique(index + columns)
+        unique_values = np.unique(values)
+
+        if len(values):
+            to_group = self.getitem_column_array(unique_values)
+        else:
+            to_group = self.drop(columns=unique_keys)
+
+        keys_columns = self.getitem_column_array(unique_keys)
+
+        def applyier(df, other):
+            concated = pandas.concat([df, other], axis=1, copy=False)
+            result = concated.pivot_table(
+                index=index,
+                values=values if len(values) > 0 else None,
+                columns=columns,
+                aggfunc=aggfunc,
+                fill_value=fill_value,
+                margins=margins,
+                dropna=dropna,
+                margins_name=margins_name,
+                observed=observed,
+            )
+
+            # in that case Pandas transposes the result of `pivot_table`,
+            # transposing it back to be consistent with column axis values along
+            # different partitions
+            if len(index) == 0 and len(columns) > 0:
+                result = result.T
+
+            return result
+
+        result = self.__constructor__(
+            to_group._modin_frame.broadcast_apply_full_axis(
+                axis=0, func=applyier, other=keys_columns._modin_frame
+            )
+        )
+
+        # transposing the result again, to be consistent with Pandas result
+        if len(index) == 0 and len(columns) > 0:
+            result = result.transpose()
+
+        if len(values) == 0:
+            values = self.columns.drop(unique_keys)
+
+        # if only one value is specified, removing level that maps
+        # columns from `values` to the actual values
+        if len(index) > 0 and len(values) == 1 and result.columns.nlevels > 1:
+            result.columns = result.columns.droplevel(int(margins))
+
+        return result
 
     # Get_dummies
     def get_dummies(self, columns, **kwargs):
