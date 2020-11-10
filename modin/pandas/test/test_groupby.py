@@ -16,7 +16,7 @@ import pandas
 import numpy as np
 import modin.pandas as pd
 from modin.utils import try_cast_to_pandas, get_current_backend
-from modin.pandas.utils import from_pandas
+from modin.pandas.utils import from_pandas, is_scalar
 from .utils import (
     df_equals,
     check_df_columns_have_nans,
@@ -47,6 +47,17 @@ def eval_aggregation(md_df, pd_df, operation=None, by=None, *args, **kwargs):
         *args,
         **kwargs,
     )
+
+
+def build_types_asserter(comparator):
+    def wrapper(obj1, obj2, *args, **kwargs):
+        error_str = f"obj1 and obj2 has incorrect types: {type(obj1)} and {type(obj2)}"
+        assert not (is_scalar(obj1) ^ is_scalar(obj2)), error_str
+        assert obj1.__module__.split(".")[0] == "modin", error_str
+        assert obj2.__module__.split(".")[0] == "pandas", error_str
+        comparator(obj1, obj2, *args, **kwargs)
+
+    return wrapper
 
 
 @pytest.mark.parametrize("as_index", [True, False])
@@ -93,6 +104,7 @@ def test_mixed_dtypes_groupby(as_index):
             modin_df_almost_equals_pandas,
             is_default=True,
         )
+        eval_shift(modin_groupby, pandas_groupby)
         eval_mean(modin_groupby, pandas_groupby)
         eval_any(modin_groupby, pandas_groupby)
         eval_min(modin_groupby, pandas_groupby)
@@ -287,6 +299,7 @@ def test_simple_row_groupby(by, as_index, col1_category):
 
     modin_groupby_equals_pandas(modin_groupby, pandas_groupby)
     eval_ngroups(modin_groupby, pandas_groupby)
+    eval_shift(modin_groupby, pandas_groupby)
     eval_general(modin_groupby, pandas_groupby, lambda df: df.ffill(), is_default=True)
     eval_general(
         modin_groupby,
@@ -426,6 +439,7 @@ def test_single_group_row_groupby():
 
     modin_groupby_equals_pandas(modin_groupby, pandas_groupby)
     eval_ngroups(modin_groupby, pandas_groupby)
+    eval_shift(modin_groupby, pandas_groupby)
     eval_skew(modin_groupby, pandas_groupby)
     eval_general(modin_groupby, pandas_groupby, lambda df: df.ffill(), is_default=True)
     eval_general(
@@ -541,6 +555,7 @@ def test_large_row_groupby(is_by_category):
 
     modin_groupby_equals_pandas(modin_groupby, pandas_groupby)
     eval_ngroups(modin_groupby, pandas_groupby)
+    eval_shift(modin_groupby, pandas_groupby)
     eval_skew(modin_groupby, pandas_groupby)
     eval_general(modin_groupby, pandas_groupby, lambda df: df.ffill(), is_default=True)
     eval_general(
@@ -655,6 +670,7 @@ def test_simple_col_groupby():
 
     modin_groupby_equals_pandas(modin_groupby, pandas_groupby)
     eval_ngroups(modin_groupby, pandas_groupby)
+    eval_shift(modin_groupby, pandas_groupby)
     eval_skew(modin_groupby, pandas_groupby)
     eval_general(modin_groupby, pandas_groupby, lambda df: df.ffill(), is_default=True)
     eval_general(
@@ -785,6 +801,7 @@ def test_series_groupby(by, as_index_series_or_dataframe):
 
         modin_groupby_equals_pandas(modin_groupby, pandas_groupby)
         eval_ngroups(modin_groupby, pandas_groupby)
+        eval_shift(modin_groupby, pandas_groupby)
         eval_general(
             modin_groupby, pandas_groupby, lambda df: df.ffill(), is_default=True
         )
@@ -1038,16 +1055,18 @@ def eval_quantile(modin_groupby, pandas_groupby):
 
 
 def eval___getattr__(modin_groupby, pandas_groupby, item):
-    try:
-        pandas_groupby = pandas_groupby[item]
-        pandas_result = pandas_groupby.count()
-    except Exception as e:
-        with pytest.raises(type(e)):
-            modin_groupby[item].count()
-    else:
-        modin_groupby = modin_groupby[item]
-        modin_result = modin_groupby.count()
-        df_equals(modin_result, pandas_result)
+    eval_general(
+        modin_groupby,
+        pandas_groupby,
+        lambda grp: grp[item].count(),
+        comparator=build_types_asserter(df_equals),
+    )
+    eval_general(
+        modin_groupby,
+        pandas_groupby,
+        lambda grp: getattr(grp, item).count(),
+        comparator=build_types_asserter(df_equals),
+    )
 
 
 def eval_groups(modin_groupby, pandas_groupby):
@@ -1056,7 +1075,26 @@ def eval_groups(modin_groupby, pandas_groupby):
 
 
 def eval_shift(modin_groupby, pandas_groupby):
-    assert modin_groupby.groups == pandas_groupby.groups
+    eval_general(
+        modin_groupby,
+        pandas_groupby,
+        lambda groupby: groupby.shift(),
+    )
+    eval_general(
+        modin_groupby,
+        pandas_groupby,
+        lambda groupby: groupby.shift(periods=0),
+    )
+    eval_general(
+        modin_groupby,
+        pandas_groupby,
+        lambda groupby: groupby.shift(periods=-3),
+    )
+    eval_general(
+        modin_groupby,
+        pandas_groupby,
+        lambda groupby: groupby.shift(axis=1, fill_value=777),
+    )
 
 
 def test_groupby_on_index_values_with_loop():
@@ -1109,6 +1147,38 @@ def test_groupby_multiindex():
     df_equals(modin_df.groupby(by=by).count(), pandas_df.groupby(by=by).count())
 
 
+@pytest.mark.parametrize("groupby_axis", [0, 1])
+@pytest.mark.parametrize("shift_axis", [0, 1])
+def test_shift_freq(groupby_axis, shift_axis):
+    pandas_df = pandas.DataFrame(
+        {
+            "col1": [1, 0, 2, 3],
+            "col2": [4, 5, np.NaN, 7],
+            "col3": [np.NaN, np.NaN, 12, 10],
+            "col4": [17, 13, 16, 15],
+        }
+    )
+    modin_df = from_pandas(pandas_df)
+
+    new_index = pandas.date_range("1/12/2020", periods=4, freq="S")
+    if groupby_axis == 0 and shift_axis == 0:
+        pandas_df.index = modin_df.index = new_index
+        by = [["col2", "col3"], ["col2"], ["col4"], [0, 1, 0, 2]]
+    else:
+        pandas_df.index = modin_df.index = new_index
+        pandas_df.columns = modin_df.columns = new_index
+        by = [[0, 1, 0, 2]]
+
+    for _by in by:
+        pandas_groupby = pandas_df.groupby(by=_by, axis=groupby_axis)
+        modin_groupby = modin_df.groupby(by=_by, axis=groupby_axis)
+        eval_general(
+            modin_groupby,
+            pandas_groupby,
+            lambda groupby: groupby.shift(axis=shift_axis, freq="S"),
+        )
+
+
 def test_agg_func_None_rename():
     pandas_df = pandas.DataFrame(
         {
@@ -1131,7 +1201,17 @@ def test_agg_func_None_rename():
 
 
 @pytest.mark.parametrize(
-    "operation", ["quantile", "mean", "sum", "median", "unique", "cumprod"]
+    "operation",
+    [
+        "quantile",
+        "mean",
+        pytest.param(
+            "sum", marks=pytest.mark.skip("See Modin issue #2255 for details")
+        ),
+        "median",
+        "unique",
+        "cumprod",
+    ],
 )
 def test_agg_exceptions(operation):
     N = 256

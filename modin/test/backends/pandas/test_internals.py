@@ -11,28 +11,30 @@
 # ANY KIND, either express or implied. See the License for the specific language
 # governing permissions and limitations under the License.
 
-
-class PartitionedIndex(object):
-
-    _index_lengths_cache = None
-
-    def _get_partition_lengths(self):
-        if self._index_lengths_cache is None:
-            self._index_lengths_cache = [
-                obj.apply(len).get() for obj in self.index_partitions[:0]
-            ]
-        return self._index_lengths_cache
-
-    def _set_partition_lengths(self, new_value):
-        self._partition_length_cache = new_value
-
-    index_lengths = property(_get_partition_lengths, _set_partition_lengths)
-
-    def __getitem__(self, key):
-        cls = type(self)
-        return cls(self.index_partitions[key])
+import modin.pandas as pd
 
 
-class RayPartitionedIndex(PartitionedIndex):
-    def __init__(self, index_partitions):
-        self.index_partitions = index_partitions
+def test_aligning_blocks():
+    # Test problem when modin frames have the same number of rows, but different
+    # blocks (partition.list_of_blocks). See #2322 for details
+    accm = pd.DataFrame(["-22\n"] * 162)
+    accm = accm.iloc[2:, :]
+    accm.reset_index(drop=True, inplace=True)
+    accm["T"] = pd.Series(["24.67\n"] * 145)
+
+    # see #2322 for details
+    repr(accm)
+
+
+def test_aligning_blocks_with_duplicated_index():
+    # Same problem as in `test_aligning_blocks` but with duplicated values in index.
+    data11 = [0, 1]
+    data12 = [2, 3]
+
+    data21 = [0]
+    data22 = [1, 2, 3]
+
+    df1 = pd.DataFrame(data11).append(pd.DataFrame(data12))
+    df2 = pd.DataFrame(data21).append(pd.DataFrame(data22))
+
+    repr(df1 - df2)

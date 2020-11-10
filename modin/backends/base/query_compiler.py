@@ -23,6 +23,7 @@ from modin.data_management.functions.default_methods import (
     CatDefault,
     GroupByDefault,
 )
+from modin.error_message import ErrorMessage
 
 from pandas.core.dtypes.common import is_scalar
 import pandas.core.resample
@@ -32,6 +33,7 @@ import numpy as np
 
 def _get_axis(axis):
     def axis_getter(self):
+        ErrorMessage.default_to_pandas(f"DataFrame.get_axis({axis})")
         return self.to_pandas().axes[axis]
 
     return axis_getter
@@ -56,7 +58,8 @@ class BaseQueryCompiler(abc.ABC):
 
     @abc.abstractmethod
     def default_to_pandas(self, pandas_op, *args, **kwargs):
-        """Default to pandas behavior.
+        """
+        Default to pandas behavior.
 
         Parameters
         ----------
@@ -1394,14 +1397,35 @@ class BaseQueryCompiler(abc.ABC):
             drop=drop,
         )
 
-    def groupby_agg(self, by, axis, agg_func, groupby_args, agg_args, drop=False):
+    def groupby_agg(
+        self,
+        by,
+        is_multi_by,
+        axis,
+        agg_func,
+        agg_args,
+        agg_kwargs,
+        groupby_kwargs,
+        drop=False,
+    ):
+        if is_multi_by:
+            if isinstance(by, type(self)) and len(by.columns) == 1:
+                by = by.columns[0] if drop else by.to_pandas().squeeze()
+            elif isinstance(by, type(self)):
+                by = list(by.columns)
+            else:
+                by = by
+        else:
+            by = by.to_pandas().squeeze() if isinstance(by, type(self)) else by
+
         return GroupByDefault.register(pandas.core.groupby.DataFrameGroupBy.aggregate)(
             self,
             by=by,
+            is_multi_by=is_multi_by,
             axis=axis,
             agg_func=agg_func,
-            groupby_args=groupby_args,
-            agg_args=agg_args,
+            groupby_args=groupby_kwargs,
+            agg_args=agg_kwargs,
             drop=drop,
         )
 
@@ -1559,6 +1583,50 @@ class BaseQueryCompiler(abc.ABC):
             return isinstance(self.index, pandas.MultiIndex)
         assert axis == 1
         return isinstance(self.columns, pandas.MultiIndex)
+
+    def get_index_name(self):
+        """
+        Get index name.
+
+        Returns
+        -------
+        hashable
+            Index name, None for MultiIndex.
+        """
+        return self.index.name
+
+    def set_index_name(self, name):
+        """
+        Set index name.
+
+        Parameters
+        ----------
+        name: hashable
+            New index name.
+        """
+        self.index.name = name
+
+    def get_index_names(self):
+        """
+        Get index names.
+
+        Returns
+        -------
+        list
+            Index names.
+        """
+        return self.index.names
+
+    def set_index_names(self, names):
+        """
+        Set index names.
+
+        Parameters
+        ----------
+        names: list
+            New index names.
+        """
+        self.index.names = names
 
     # DateTime methods
 

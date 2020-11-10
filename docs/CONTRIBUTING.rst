@@ -82,6 +82,28 @@ commits and push them to GitHub.
 If you've pushed your changes to GitHub already you'll need to force push your branch
 after this with ``git push -f``.
 
+Commit Message formatting
+-------------------------
+To ensure that all commit messages in the master branch follow a specific format, we
+enforce that all commit messages must follow the following format:
+
+.. code-block:: bash
+  FEAT-#9999: Add `DataFrame.rolling` functionality, to enable rolling window operations
+The ``FEAT`` component represents the type of commit. This component of the commit
+message can be one of the following:
+
+* FEAT: A new feature that is added
+* DOCS: Documentation improvements or updates
+* FIX: A bugfix contribution
+* REFACTOR: Moving or removing code without change in functionality
+* TEST: Test updates or improvements
+
+The ``#9999`` component of the commit message should be the issue number in the Modin
+GitHub issue tracker: https://github.com/modin-project/modin/issues. This is important
+because it links commits to their issues.
+
+The commit message should follow a colon (:) and be descriptive and succinct.
+
 Development Dependencies
 ------------------------
 
@@ -91,9 +113,9 @@ dependencies for running the tests and formatting the code:
 
 .. code-block:: bash
 
+  conda env create --file environment.yml
+  # or
   pip install -r requirements.txt
-
-For developments under Windows, dependencies can be found in 'env_windows.yml' file. 
 
 Code Formatting and Lint
 ------------------------
@@ -106,13 +128,13 @@ that you run the following from the project root:
   black modin/
 
 We also use flake8_ to check linting errors. Running the following from the project root
-will ensure that it passes the lint checks on Travis:
+will ensure that it passes the lint checks on Github Actions:
 
 .. code-block:: bash
 
   flake8 .
 
-We test that this has been run on our `Travis CI`_ test suite. If you do this and find
+We test that this has been run on our `Github Actions`_ test suite. If you do this and find
 that the tests are still failing, try updating your version of black and flake8.
 
 Adding a test
@@ -159,6 +181,6 @@ More docs on this coming soon...
 .. _internal methods:
 .. _black: https://github.com/ambv/black
 .. _flake8: http://flake8.pycqa.org/en/latest/
-.. _Travis CI: https://travis-ci.org/
+.. _Github Actions: https://github.com/features/actions
 .. _testing:
 .. _developer mailing list: https://groups.google.com/forum/#!forum/modin-dev
